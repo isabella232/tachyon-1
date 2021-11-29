@@ -2,6 +2,8 @@ const Table = require('cli-table');
 const Filesize = require('filesize');
 const tachyon = require('../index');
 const fs = require('fs');
+const ssim = require('ssim.js');
+const canvas = require('canvas');
 
 let images = fs.readdirSync( __dirname + '/images' );
 
@@ -40,7 +42,6 @@ async function test() {
 		images.map(async imageName => {
 			const image = `${__dirname}/images/${imageName}`;
 			const imageData = fs.readFileSync(image);
-			const original = await tachyon.resizeBuffer(imageData, {});
 			const sizes = {
 				original: {},
 				small: { w: 100 },
@@ -51,41 +52,57 @@ async function test() {
 			};
 			const promises = await Promise.all(
 				Object.entries(sizes).map(async ([size, args]) => {
-					return tachyon.resizeBuffer(imageData, args);
+					return Promise.all([
+						tachyon.resizeBuffer(imageData, {...args, quality: 100 } ),
+						tachyon.resizeBuffer(imageData, { ...args, quality: 10 } )
+					])
 				})
 			);
 
 			// Zip tehm back into a size => image map.
-			const resized = promises.reduce((images, image, index) => {
-				images[Object.keys(sizes)[index]] = image;
+			const resized = promises.reduce((images, imageVariants, index) => {
+				images[Object.keys(sizes)[index]] = imageVariants;
 				return images;
 			}, {});
 
 			// Save each one to the file system for viewing.
-			Object.entries(resized).forEach(([size, image]) => {
-				const imageKey = `${imageName}-${size}.${image.info.format == 'heif' ? 'avif' : image.info.format }`;
-				fixtures[ imageKey ] = image.data.length;
-				fs.writeFile( `${__dirname}/output/${imageKey}`, image.data, () => {});
+			Object.entries(resized).forEach(([size, imageVariants]) => {
+				const imageKey = `${imageName}-${size}.${imageVariants[1].info.format == 'heif' ? 'avif' : imageVariants[1].info.format }`;
+				const imageKeyQ100 = `${imageName}-${size}-q100.${imageVariants[0].info.format == 'heif' ? 'avif' : imageVariants[0].info.format }`;
+				fixtures[ imageKey ] = imageVariants[1].data.length;
+				fs.writeFile( `${__dirname}/output/${imageKey}`, imageVariants[1].data, () => {});
+				fs.writeFile( `${__dirname}/output/${imageKeyQ100}`, imageVariants[0].data, () => {});
 			});
+
+			async function itemToimageData( item ) {
+				const img = await canvas.loadImage(item.data);
+				const c = canvas.createCanvas(img.width, img.height);
+				const ctx = c.getContext("2d");
+				ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, img.width, img.height);
+				return ctx.getImageData(0, 0, img.width, img.height);
+			}
+			async function quality_diff( item ) {
+				return `(SSIM ${ ssim.ssim( await itemToimageData( item[0] ), await itemToimageData( item[1] ) ).mssim })`;
+			}
 
 			table.push([
 				imageName,
-				Filesize(imageData.length, { round: 0 }),
-				Filesize(resized.original.info.size, { round: 0 }) +
+				`${ Filesize(imageData.length, { round: 0 }) }`,
+				Filesize(resized.original[1].info.size, { round: 0 }) +
 					' (' +
-					Math.floor(resized.original.info.size / imageData.length * 100) +
-					'%)',
-				Filesize(resized.small.info.size, { round: 0 }),
-				Filesize(resized.medium.info.size, { round: 0 }),
-				Filesize(resized.large.info.size, { round: 0 }),
-				Filesize(resized.webp.info.size, { round: 0 }) +
+					Math.floor(resized.original[1].info.size / imageData.length * 100) +
+					'%) ' + ( await quality_diff( resized.original ) ),
+				Filesize(resized.small[1].info.size, { round: 0 }) + ( await quality_diff( resized.small ) ),
+				Filesize(resized.medium[1].info.size, { round: 0 }) + ( await quality_diff( resized.medium ) ),
+				Filesize(resized.large[1].info.size, { round: 0 }) + ( await quality_diff( resized.large ) ),
+				Filesize(resized.webp[1].info.size, { round: 0 }) +
 					' (' +
-					Math.floor(resized.webp.info.size / resized.large.info.size * 100) +
-					'%)',
-				Filesize(resized.avif.info.size, { round: 0 }) +
+					Math.floor(resized.webp[1].info.size / resized.large[1].info.size * 100) +
+					'%) ',
+				Filesize(resized.avif[1].info.size, { round: 0 }) +
 				' (' +
-				Math.floor(resized.avif.info.size / resized.large.info.size * 100) +
-				'%)',
+				Math.floor(resized.avif[1].info.size / resized.large[1].info.size * 100) +
+				'%) ',
 			]);
 
 		})
